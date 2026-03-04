@@ -43,8 +43,8 @@ NMAX = 1500
 #
 #   List of obstacles/objects as well as the start/goal.
 #
-(xmin, xmax) = (0, 12)
-(ymin, ymax) = (0, 10)
+(xmin, xmax) = (0, 10)
+(ymin, ymax) = (0, 12)
 
 # Collect all the triangles and prepare (for faster checking).
 obstacles = prep(MultiPolygon([
@@ -110,14 +110,17 @@ class Visualization:
 #
 #   Node Definition
 #
+
 class Node:
     #################
     # Initialization:
-    def __init__(self, x, y):
+    def __init__(self, x, y, d=0):
         # Define/remember the state/coordinates (x,y).
         self.x = x
         self.y = y
-
+        self.children=set()
+        self.d=d
+        self.cost=d
         # Define a parent (cleared for now).
         self.parent = None
 
@@ -152,6 +155,22 @@ class Node:
             if obstacles.context.distance(line) < clearance:
                 return False
         return True
+    
+    def update_subtree_cost(self):
+        for c in self.children:
+            c.cost=self.cost+c.d
+            c.update_subtree_cost()
+    
+    def rewire(self, newparent, d):
+        if self.parent is not None:
+            self.parent.children.remove(self)
+            self.parent=newparent
+            self.parent.children.add(self)
+            self.d=d
+            self.cost=self.parent.cost+d
+            self.update_subtree_cost()
+
+
 
 
     ############
@@ -165,6 +184,7 @@ class Node:
     def intermediate(self, other, alpha):
         return Node(self.x + alpha * (other.x - self.x),
                     self.y + alpha * (other.y - self.y))
+
 
 
 ######################################################################
@@ -234,6 +254,85 @@ def trace(node):
         path.append(node)
         node=node.parent
     return path
+
+def rrt_star(startnode,goalnode,visual=None):
+    startnode.parent = None
+    tree = [startnode]
+    goal_n=None
+    # Loop - keep growing the tree.
+    steps = 0
+    while True:
+        # Determine the target state.
+        # Abort?
+        if (steps >= SMAX) or (len(tree) >= NMAX):
+            print("Aborted after %d steps and the tree having %d nodes" % (steps, len(tree)))
+            break
+
+        if (random.uniform(0.0, 1.0) < GOALFRAC):
+            targetnode = goalnode
+        else:
+            targetnode = Node(random.uniform(xmin, xmax),
+                              random.uniform(ymin, ymax))
+
+        # Directly determine the distances to the target node.
+        distances = np.array([node.distance(targetnode) for node in tree])
+        index     = np.argmin(distances)
+        grownode  = tree[index]
+        d         = distances[index]
+
+        # Determine the next node.
+        if (d <= DSTEP):
+            newnode = targetnode
+        else:
+            newnode = grownode.intermediate(targetnode, DSTEP/d)
+        # Collision/local planner
+        if (not newnode.inFreespace()) or (not grownode.connectsTo(newnode)):
+            steps += 1
+            continue
+            
+
+        neighbors=[n for n in tree if n.distance(newnode) <= radius]
+        best_parent = grownode
+        best_cost = grownode.cost + grownode.distance(newnode)
+
+        for n in neighbors:
+            if not n.connectsTo(newnode):
+                continue
+            if n.cost+n.distance(newnode)<best_cost:
+                best_parent=n
+                best_cost=n.cost+n.distance(newnode)
+        addtotree(tree, best_parent, newnode, True, visual)
+
+        for n in neighbors:
+            if n is newnode.parent:
+                continue
+            new_cost_to_n=newnode.cost+newnode.distance(n)
+            if new_cost_to_n<n.cost and newnode.connectsTo(n):
+                n.rewire(newnode, newnode.distance(n))
+                if visual:
+                    visual.drawEdge(newnode, n, color='g', linewidth=1)
+        if newnode.distance(goalnode)<=DSTEP and newnode.connectsTo(goalnode):
+            if goal_n is None:
+                goal_n = Node(goalnode.x, goalnode.y, newnode.distance(goalnode))
+                addtotree(tree, newnode, goal_n, True, visual)
+            else:
+                cand = newnode.cost + newnode.distance(goal_n)
+                if cand < goal_n.cost and newnode.connectsTo(goal_n):
+                    goal_n.rewire(newnode, newnode.distance(goal_n))
+        # Check whether we should abort - too many steps or nodes.
+        steps += 1
+
+    # Build the path.
+    path = [goal_n]
+    while path[0].parent is not None:
+        path.insert(0, path[0].parent)
+
+    # Report and return.
+    print("Finished after %d steps and the tree having %d nodes" %
+          (steps, len(tree)))
+    return path
+
+
 def rrt_connect(startnode, goalnode, visual=None):
     # Start the tree with the startnode (set no parent just in case).
     startnode.parent = None

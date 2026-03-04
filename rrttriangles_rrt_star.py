@@ -35,8 +35,6 @@ CLEARANCE = 0.15
 # Maximum number of steps (attempts) or nodes (successful steps).
 SMAX = 50000
 NMAX = 1500
-Maxspeed=0.25
-tmax=100
 
 
 ######################################################################
@@ -45,20 +43,25 @@ tmax=100
 #
 #   List of obstacles/objects as well as the start/goal.
 #
-(xmin, xmax) = (0, 12)
-(ymin, ymax) = (0, 10)
-(t0,tmax)=(0,100)
+(xmin, xmax) = (0, 10)
+(ymin, ymax) = (0, 12)
 
 # Collect all the triangles and prepare (for faster checking).
 obstacles = prep(MultiPolygon([
     Polygon([[7,  3], [3,  3], [3,  4], [7,  3]]),
     Polygon([[5,  5], [7,  7], [4,  6], [5,  5]]),
     Polygon([[9,  2], [8,  7], [6,  5], [9,  2]]),
-    Polygon([[1, 10], [7, 10], [4,  8], [1, 10]])]))
+    Polygon([[1, 10], [7, 10], [4,  8], [1, 10]]),
+    Polygon([[1,2],[1,8],[2,8],[2,2]]),
+    Polygon([[3,5],[3,8],[3.5,6]]),
+    Polygon([[1,1],[3,2],[5,2],[5,1]]),
+    Polygon([[6,8],[9,8],[9,10]])]))
+
+
 
 # Define the start/goal states (x, y, theta)
 (xstart, ystart) = (6, 1)
-(xgoal,  ygoal)  = (8, 10)
+(xgoal,  ygoal)  = (4.5, 11)
 
 
 ######################################################################
@@ -101,8 +104,15 @@ class Visualization:
     def drawNode(self, node, **kwargs):
         plt.plot(node.x, node.y, **kwargs)
 
+    # def drawEdge(self, head, tail, **kwargs):
+    #     plt.plot([head.x, tail.x], [head.y, tail.y], **kwargs)
+
     def drawEdge(self, head, tail, **kwargs):
-        plt.plot([head.x, tail.x], [head.y, tail.y], **kwargs)
+        (line,) = plt.plot([head.x, tail.x], [head.y, tail.y], **kwargs)
+        return line
+
+    def updateEdge(self, line, head, tail):
+        line.set_data([head.x, tail.x], [head.y, tail.y])
 
     def drawPath(self, path, **kwargs):
         for i in range(len(path)-1):
@@ -113,17 +123,20 @@ class Visualization:
 #
 #   Node Definition
 #
+
 class Node:
     #################
     # Initialization:
-    def __init__(self, x, y, t):
+    def __init__(self, x, y, d=0):
         # Define/remember the state/coordinates (x,y).
         self.x = x
         self.y = y
-        self.t = t
-
+        self.children=set()
+        self.d=d
+        self.cost=d
         # Define a parent (cleared for now).
         self.parent = None
+        self.edge_handle = None
 
     ################
     # Planner functions:
@@ -144,9 +157,6 @@ class Node:
 
     # Check the local planner - whether this connects to another node.
     def connectsTo(self, other, clearance=CLEARANCE):
-        if other.t<=self.t:
-            return False
-        dt=other.t-self.t
         line = LineString([(self.x, self.y), (other.x, other.y)])
 
         # 1) Must be collision-free (no intersection with obstacle interiors)
@@ -159,6 +169,22 @@ class Node:
             if obstacles.context.distance(line) < clearance:
                 return False
         return True
+    
+    def update_subtree_cost(self):
+        for c in self.children:
+            c.cost=self.cost+c.d
+            c.update_subtree_cost()
+    
+    def rewire(self, newparent, d):
+        if self.parent is not None:
+            self.parent.children.remove(self)
+        self.parent=newparent
+        self.parent.children.add(self)
+        self.d=d
+        self.cost=self.parent.cost+d
+        self.update_subtree_cost()
+
+
 
 
     ############
@@ -174,6 +200,7 @@ class Node:
                     self.y + alpha * (other.y - self.y))
 
 
+
 ######################################################################
 #
 #   RRT Functions
@@ -181,16 +208,23 @@ class Node:
 
 def addtotree(tree,oldnode,newnode, is_start=True, visual=None):
     newnode.parent = oldnode
+    oldnode.children.add(newnode)
+    newnode.d=oldnode.distance(newnode)
+    newnode.cost=oldnode.cost+newnode.d
     tree.append(newnode)
     if visual:
-        if is_start:
-            visual.drawEdge(oldnode, newnode, color='g', linewidth=1)
-        else:
-            visual.drawEdge(oldnode, newnode, color='r', linewidth=1)
-        visual.show()
+        # if is_start:
+        #     visual.drawEdge(oldnode, newnode, color='g', linewidth=1)
+        # else:
+        #     visual.drawEdge(oldnode, newnode, color='r', linewidth=1)
+        # visual.show()
+        if visual:
+            color = 'g' if is_start else 'r'
+            newnode.edge_handle = visual.drawEdge(oldnode, newnode, color=color, linewidth=1)
+            visual.show()
 
 
-def extend_towards(tree, target, is_start=True, visual=None):
+def extend_towards(tree, target, is_start=True, ratio=1, visual=None):
     """
     Extend the tree toward target by repeatedly stepping DSTEP.
 
@@ -203,7 +237,7 @@ def extend_towards(tree, target, is_start=True, visual=None):
     distances = np.array([node.distance(target) for node in tree])
     index     = int(np.argmin(distances))
     last      = tree[index]
-
+    last0=Node(last.x,last.y)
     n_added = 0
     while True:
         d = last.distance(target)
@@ -231,6 +265,9 @@ def extend_towards(tree, target, is_start=True, visual=None):
         last = newnode
         n_added += 1
 
+        if last0.distance(newnode)>ratio*d:
+            return last, True
+
         # 5) did we reach the target?
         if reached_target:
             return last, True, n_added
@@ -241,6 +278,100 @@ def trace(node):
         path.append(node)
         node=node.parent
     return path
+
+def rrt_star(startnode,goalnode,visual=None,radius=1.5):
+    startnode.parent = None
+    startnode.cost=0
+    startnode.d=0
+    startnode.children=set()
+    tree = [startnode]
+    goal_n=None
+    # Loop - keep growing the tree.
+    steps = 0
+    while True:
+        # Determine the target state.
+        # Abort?
+        if (steps >= SMAX) or (len(tree) >= NMAX):
+            print("Aborted after %d steps and the tree having %d nodes" % (steps, len(tree)))
+            break
+
+        if (random.uniform(0.0, 1.0) < GOALFRAC):
+            targetnode = Node(goalnode.x, goalnode.y)
+        else:
+            targetnode = Node(random.uniform(xmin, xmax),
+                              random.uniform(ymin, ymax))
+
+        # Directly determine the distances to the target node.
+        distances = np.array([node.distance(targetnode) for node in tree])
+        index     = np.argmin(distances)
+        grownode  = tree[index]
+        d         = distances[index]
+
+        # Determine the next node.
+        if (d <= DSTEP):
+            newnode = targetnode
+        else:
+            newnode = grownode.intermediate(targetnode, DSTEP/d)
+        # Collision/local planner
+        if (not newnode.inFreespace()) or (not grownode.connectsTo(newnode)):
+            steps += 1
+            continue
+            
+
+        neighbors=[n for n in tree if n.distance(newnode) <= radius]
+        best_parent = grownode
+        best_cost = grownode.cost + grownode.distance(newnode)
+
+        for n in neighbors:
+            if not n.connectsTo(newnode):
+                continue
+            if n.cost+n.distance(newnode)<best_cost:
+                best_parent=n
+                best_cost=n.cost+n.distance(newnode)
+        addtotree(tree, best_parent, newnode, True, visual)
+
+        for n in neighbors:
+            if n is newnode.parent:
+                continue
+            new_cost_to_n=newnode.cost+newnode.distance(n)
+            if new_cost_to_n<n.cost and newnode.connectsTo(n):
+                n.rewire(newnode, newnode.distance(n))
+                if visual:
+                    # visual.drawEdge(newnode, n, color='g', linewidth=1)
+                    # update the existing line instead of adding a new one
+                    if n.edge_handle is None:
+                        n.edge_handle = visual.drawEdge(newnode, n, color='g', linewidth=1)
+                    else:
+                        visual.updateEdge(n.edge_handle, newnode, n)
+                    visual.show()
+        if newnode.distance(goalnode)<=DSTEP and newnode.connectsTo(goalnode):
+            if goal_n is None:
+                goal_n = Node(goalnode.x, goalnode.y, newnode.distance(goalnode))
+                addtotree(tree, newnode, goal_n, True, visual)
+            else:
+                cand = newnode.cost + newnode.distance(goal_n)
+                if cand < goal_n.cost and newnode.connectsTo(goal_n):
+                    goal_n.rewire(newnode, newnode.distance(goal_n))
+                    if visual:
+                        if goal_n.edge_handle is None:
+                            goal_n.edge_handle = visual.drawEdge(newnode, goal_n, color='g', linewidth=1)
+                        else:
+                            visual.updateEdge(goal_n.edge_handle, newnode, goal_n)
+                        visual.show()
+        # Check whether we should abort - too many steps or nodes.
+        steps += 1
+
+    # Build the path.
+    path = [goal_n]
+    while path[0].parent is not None:
+        path.insert(0, path[0].parent)
+
+    # Report and return.
+    print("Finished after %d steps and the tree having %d nodes" %
+          (steps, len(tree)))
+    return (path, goal_n.cost)
+
+
 def rrt_connect(startnode, goalnode, visual=None):
     # Start the tree with the startnode (set no parent just in case).
     startnode.parent = None
@@ -272,7 +403,7 @@ def rrt_connect(startnode, goalnode, visual=None):
             is_start_1=False
             is_start_2=True
             tree1, tree2 = tree_goal, tree_ini
-        last1, success1, n1 = extend_towards(tree1, targetnode, is_start_1, visual)
+        last1, success1, n1 = extend_towards(tree1, targetnode, is_start_1, ratio=2/3, visual=visual)
         last2, success2, n2= extend_towards(tree2, last1, is_start_2,visual)
         steps += n1+n2
         if success2:
@@ -387,7 +518,8 @@ def main():
 
     # Run the RRT planner.
     print("Running RRT...")
-    path = rrt_connect(startnode, goalnode, visual)
+    # path= rrt_connect(startnode, goalnode, visual)
+    path, _ = rrt_star(startnode, goalnode, visual)
 
     # If unable to connect, just note before closing.
     if not path:
@@ -395,9 +527,11 @@ def main():
         return
 
     # Show the path.
-    cost = pathCost(path)
+    path_cost = pathCost(path)
+
+
     visual.drawPath(path, color='r', linewidth=2)
-    visual.show("Showing the raw path (cost/length %.1f)" % cost)
+    visual.show("Showing the raw path (length %.1f)" % path_cost)
 
 
     # Post process the path.
