@@ -1,20 +1,17 @@
-'''rrttriangles_solution.py
+'''rrt_maze.py
 
-   This is the RRT solution code for the 2D triangular problem.
-
-   Use RRT to find a path around polygonal obstacles.
-
+   RRT in a continuous maze (thin line-segment walls from gym-continuous-maze style).
+   Uses continuous_maze.walls and obstacles; connectsTo like rrttriangles (LineString + one check).
 '''
 
 import matplotlib.pyplot as plt
 import numpy as np
 import random
-import time
 
-from math               import inf, pi, sin, cos, atan2, sqrt, ceil, dist
+from math import sqrt
 
-from shapely.geometry   import Point, LineString, Polygon, MultiPolygon
-from shapely.prepared   import prep
+from shapely.geometry import LineString
+from continuous_maze import walls, obstacles
 
 
 ######################################################################
@@ -43,19 +40,14 @@ NMAX = 1500
 #
 #   List of obstacles/objects as well as the start/goal.
 #
-(xmin, xmax) = (0, 12)
-(ymin, ymax) = (0, 10)
+(xmin, xmax) = (-12, 12)
+(ymin, ymax) = (-12, 12)
 
-# Collect all the triangles and prepare (for faster checking).
-obstacles = prep(MultiPolygon([
-    Polygon([[7,  3], [3,  3], [3,  4], [7,  3]]),
-    Polygon([[5,  5], [7,  7], [4,  6], [5,  5]]),
-    Polygon([[9,  2], [8,  7], [6,  5], [9,  2]]),
-    Polygon([[1, 10], [7, 10], [4,  8], [1, 10]])]))
+# Maze is continuous_maze.walls (thin line segments). No Shapely obstacles.
 
-# Define the start/goal states (x, y, theta)
-(xstart, ystart) = (6, 1)
-(xgoal,  ygoal)  = (8, 10)
+# Start at center, goal in upper-right area (inside the gym maze bounds).
+(xstart, ystart) = (0, 0)
+(xgoal,  ygoal)  = (8, 8)
 
 
 ######################################################################
@@ -81,9 +73,10 @@ class Visualization:
         plt.gca().set_ylim(ymin, ymax)
         plt.gca().set_aspect('equal')
 
-        # Show the triangles.
-        for poly in obstacles.context.geoms:
-            plt.plot(*poly.exterior.xy, 'k-', linewidth=2)
+        # Show the maze walls (thin line segments).
+        from continuous_maze import walls as maze_walls
+        for wall in maze_walls:
+            plt.plot([wall[0][0], wall[1][0]], [wall[0][1], wall[1][1]], 'k-', linewidth=2)
 
         # Show immediately.
         self.show()
@@ -126,22 +119,17 @@ class Node:
     # Compute the relative distance to another node.
     def distance(self, other):
         return sqrt((other.x - self.x)**2 + (other.y - self.y)**2)
-    
-    def distance_obstacle(self):
-        p=Point(self.x,self.y)
-        return obstacles.context.boundary.distance(p)
-    # Check whether in free space.
-    def inFreespace(self):
-        if (self.x <= xmin or self.x >= xmax or
-            self.y <= ymin or self.y >= ymax):
-            return False
-        point = Point(self.x, self.y)
-        return obstacles.disjoint(point)
 
-    # Check the local planner - whether this connects to another node.
+    def inFreespace(self):
+        if self.x <= xmin or self.x >= xmax or self.y <= ymin or self.y >= ymax:
+            return False
+        return True
+
     def connectsTo(self, other):
         line = LineString([(self.x, self.y), (other.x, other.y)])
-        return obstacles.disjoint(line)
+        # Return True if path intersects any of the wall segments in the maze
+        return not line.crosses(obstacles.context)
+
 
     ############
     # Utilities:
