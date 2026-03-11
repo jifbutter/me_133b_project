@@ -669,9 +669,10 @@ def rrt_connect(startnode, goalnode, visual=None):
             targetnode=s
         
         last1, success1, n1 = extend_towards(tree1, targetnode, is_start_1, visual=visual)
+        #if targetnode is goalnode then can already stop
         last2, success2, n2= extend_towards(tree2, last1, is_start_2,visual=visual)
         steps += n1+n2
-        if success2:
+        if success2: # one path is found
             if not swap:
                 path_ini=list(reversed(trace(last1)))
                 path_goal=trace(last2)
@@ -705,11 +706,12 @@ def rrt_connect_star(startnode, goalnode, visual=None,
         while total_nodes >= next_report:
             print(f'have {total_nodes} nodes')
             next_report += 1000
-
+        # if no path is found and total_nodes>=50000
         if (steps >= SMAX) or (total_nodes>= NMAX):
             break
-        # soft cap only applies after first solution exists
-        if best_path is not None and total_nodes >= NUMNODE:
+        # if at least one path is found: stops when the total_nodes>=5000
+        if best_path is not None:
+        #and total_nodes >= NUMNODE:
             print(f"Stopped after refinement budget: nodes={total_nodes}")
             break
 
@@ -744,8 +746,8 @@ def rrt_connect_star(startnode, goalnode, visual=None,
         last2, success2, n2 = extend_towards(tree2, last1, is_start_2, visual=visual)
         steps += n2
 
-        if success2:
-            # build path exactly like your rrt_connect
+        if success2: # this is when it finds a path
+            # Build the path from the tree
             if not swap:
                 path_ini = list(reversed(trace(last1)))
                 path_goal = trace(last2)
@@ -754,7 +756,7 @@ def rrt_connect_star(startnode, goalnode, visual=None,
                 path_ini = list(reversed(trace(last2)))
                 path_goal = trace(last1)
                 path = path_ini + path_goal[1:]
-
+            # Compare the cost of this new founded path with the existing
             cost = pathCost(path)
             if cost < best_cost:
                 best_cost = cost
@@ -945,8 +947,8 @@ def main():
     visual.show("Showing planning view")
 
     print("Running RRT...")
-    path = rrt_connect_star(startnode, goalnode, visual)
-    # path = rrt_connect(startnode, goalnode, visual)
+    #path = rrt_connect_star(startnode, goalnode, visual)
+    path = rrt_connect(startnode, goalnode, visual)
     
 
     if not path:
