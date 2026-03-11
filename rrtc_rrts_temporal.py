@@ -7,13 +7,15 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import random
+import time
 
 from math import sqrt
 from shapely.geometry import MultiLineString
 from shapely.geometry import LineString
 from shapely.geometry   import Point, LineString, Polygon, MultiPolygon
 from shapely.prepared import prep
-from continuous_maze import walls, obstacles
+# from continuous_maze import walls, obstacles
+from binary_maze import walls, walls1, walls2, obstacles, obstacles1, obstacles2
 
 
 
@@ -29,24 +31,29 @@ from continuous_maze import walls, obstacles
 #     DSTEP    =  0.25    0.25  0.25  0.25     1.00  5.00    
 #     GOALFRAC =     0    0.05  0.50  0.99     0.05  0.05
 #
-DSTEP    = 0.25
+DSTEP    = 0.4
 GOALFRAC = 0.10
-CLEARANCE = 0.3
+CLEARANCE = 0.4
 
 # Maximum number of steps (attempts) or nodes (successful steps).
-SMAX = 50000
-NMAX = 5000
-R=0.95
+
+# R=0.95
 RADIUS=1.0
 ALPHA=1.0
 BETA=0
 
+MAXSPEED=5
 
+TMAX = 20        # total visualization time
+SWITCH_TIME = 4  # switch from maze 1 to maze 2
+FRAME_DT = 0.05     # seconds between redraws
+DT=0.05
+NUMNODE = 5000
 
-# walls_prep = obstacles          # already prepared
-# walls_geom = obstacles.context  # this is the MultiLineString
-
-# walls_inflated_prep = prep(walls_geom.buffer(CLEARANCE, cap_style=2, join_style=2))
+# Hard caps
+NMAX = 50000
+SMAX= 150000
+TWEIGHT=10
 
 ######################################################################
 #
@@ -56,13 +63,14 @@ BETA=0
 #
 (xmin, xmax) = (-12, 12)
 (ymin, ymax) = (-12, 12)
-
+(tmin,tmax)=(0,TMAX)
 GRID = 1.0
 NX = int(np.ceil((xmax - xmin) / GRID))
 NY = int(np.ceil((ymax - ymin) / GRID))
+NT=int(np.ceil((tmax - tmin) / GRID))
 
-counts_start = np.zeros((NX, NY), dtype=np.int32)  # tree growing from start
-counts_goal  = np.zeros((NX, NY), dtype=np.int32)  # tree growing from goal
+counts_start = np.zeros((NX, NY, NT), dtype=np.int32)  # tree growing from start
+counts_goal  = np.zeros((NX, NY, NT), dtype=np.int32)  # tree growing from goal
 
 def cell(x, y):
     i = int((x - xmin) / GRID)
@@ -71,15 +79,45 @@ def cell(x, y):
     i = max(0, min(NX - 1, i))
     j = max(0, min(NY - 1, j))
     return i, j
+def cell_t(x,y,t):
+    i = int((x - xmin) / GRID)
+    j = int((y - ymin) / GRID)
+    k =int((t-tmin)/GRID)
+    # clamp to valid range
+    i = max(0, min(NX - 1, i))
+    j = max(0, min(NY - 1, j))
+    k = max(0, min(NT-1,k))
+
+    return i, j,k
 # Maze is continuous_maze.walls (thin line segments). No Shapely obstacles.
 
 # Start at center, goal in upper-right area (inside the gym maze bounds).
-(xstart, ystart) = (-9, 11)
+(xstart, ystart, tstart) = (-9, 11, 0)
 # (xstart, ystart) = (0, 0)
 # (xgoal,  ygoal)  = (9, 8)
-(xgoal,  ygoal)  = (-1, 3)
+# (xgoal,  ygoal)  = (-1, 3)
 # (xgoal,  ygoal)  = (5, -3)
+# (xstart, ystart) = (-9, 11)
+# (xgoal,  ygoal,tgoal)  = (2.9, -3,TMAX)
+(xgoal, ygoal,tgoal)  = (3, 5,TMAX)
+# Version 2
+def get_walls(t):
+    if t < 0 or t > TMAX:
+        raise ValueError(f"t must satisfy 0 <= t <= {TMAX}")
+    tau = t % (2.0 * SWITCH_TIME)
+    return walls if tau < SWITCH_TIME else walls2
 
+def get_obstacles(t):
+    if t < 0 or t > TMAX:
+        raise ValueError(f"t must satisfy 0 <= t <= {TMAX}")
+    tau = t % (2.0 * SWITCH_TIME)
+    return obstacles if tau < SWITCH_TIME else obstacles2
+
+def current_phase_name(t):
+    if t < 0 or t > TMAX:
+        raise ValueError(f"t must satisfy 0 <= t <= {TMAX}")
+    tau = t % (2.0 * SWITCH_TIME)
+    return "maze" if tau < SWITCH_TIME else "maze 2"
 
 ######################################################################
 #
@@ -91,84 +129,102 @@ def cell(x, y):
 #     drawEdge(node1, node2, **kwargs)  Draw an edge between nodes
 #     drawPath(path,         **kwargs)  Draw a path (list of nodes)
 #
-class Visualization:
-    def __init__(self):
-        # Clear the current, or create a new figure.
-        plt.clf()
-
-        # Create a new axes, enable the grid, and set axis limits.
-        plt.axes()
-        plt.grid(True)
-        plt.gca().axis('on')
-        plt.gca().set_xlim(xmin, xmax)
-        plt.gca().set_ylim(ymin, ymax)
-        plt.gca().set_aspect('equal')
-
-        # Show the maze walls (thin line segments).
-        from continuous_maze import walls as maze_walls
-        for wall in maze_walls:
-            plt.plot([wall[0][0], wall[1][0]], [wall[0][1], wall[1][1]], 'k-', linewidth=2)
-
-        # Show immediately.
-        self.show()
-    
-
-    def show(self, text = ''):
-        # Show the plot.
-        plt.pause(0.001)
-        # If text is specified, print and wait for confirmation.
-        if len(text)>0:
-            input(text + ' (hit return to continue)')
-
-    def drawNode(self, node, **kwargs):
-        plt.plot(node.x, node.y, **kwargs)
-
-    def drawEdge(self, head, tail, **kwargs):
-        plt.plot([head.x, tail.x], [head.y, tail.y], **kwargs)
-    # def drawEdge(self, head, tail, **kwargs):
-    #     line, = self.ax.plot([head.x, tail.x], [head.y, tail.y], **kwargs)
-    #     return line
-
-    def drawPath(self, path, **kwargs):
-        for i in range(len(path)-1):
-            self.drawEdge(path[i], path[i+1], **kwargs)
-    # def updateEdge(self, line, head, tail):
-    #     line.set_data([head.x, tail.x], [head.y, tail.y])
 # class Visualization:
 #     def __init__(self):
+#         # Clear the current, or create a new figure.
 #         plt.clf()
 
-#         self.ax = plt.axes()
-#         self.ax.grid(True)
-#         self.ax.axis('on')
-#         self.ax.set_xlim(xmin, xmax)
-#         self.ax.set_ylim(ymin, ymax)
-#         self.ax.set_aspect('equal')
+#         # Create a new axes, enable the grid, and set axis limits.
+#         plt.axes()
+#         plt.grid(True)
+#         plt.gca().axis('on')
+#         plt.gca().set_xlim(xmin, xmax)
+#         plt.gca().set_ylim(ymin, ymax)
+#         plt.gca().set_aspect('equal')
 
+#         # Show the maze walls (thin line segments).
 #         from continuous_maze import walls as maze_walls
 #         for wall in maze_walls:
-#             self.ax.plot([wall[0][0], wall[1][0]], [wall[0][1], wall[1][1]], 'k-', linewidth=2)
+#             plt.plot([wall[0][0], wall[1][0]], [wall[0][1], wall[1][1]], 'k-', linewidth=2)
 
+#         # Show immediately.
 #         self.show()
 
-#     def show(self, text=''):
+#     def show(self, text = ''):
+#         # Show the plot.
 #         plt.pause(0.001)
-#         if len(text) > 0:
+#         # If text is specified, print and wait for confirmation.
+#         if len(text)>0:
 #             input(text + ' (hit return to continue)')
 
 #     def drawNode(self, node, **kwargs):
-#         self.ax.plot(node.x, node.y, **kwargs)
+#         plt.plot(node.x, node.y, **kwargs)
 
 #     def drawEdge(self, head, tail, **kwargs):
-#         line, = self.ax.plot([head.x, tail.x], [head.y, tail.y], **kwargs)
-#         return line
+#         plt.plot([head.x, tail.x], [head.y, tail.y], **kwargs)
 
 #     def drawPath(self, path, **kwargs):
 #         for i in range(len(path)-1):
 #             self.drawEdge(path[i], path[i+1], **kwargs)
+class Visualization:
+    def __init__(self):
+        plt.ion()
+        self.fig, self.ax = plt.subplots()
+        self._setup_axes()
+        self.draw_world_time(0.0)
+        self.show()
 
-#     def updateEdge(self, line, head, tail):
-#         line.set_data([head.x, tail.x], [head.y, tail.y])
+    def _setup_axes(self):
+        self.ax.clear()
+        self.ax.grid(True)
+        self.ax.axis('on')
+        self.ax.set_xlim(xmin, xmax)
+        self.ax.set_ylim(ymin, ymax)
+        self.ax.set_aspect('equal')
+
+    def draw_walls(self, wall_array, title=''):
+        self._setup_axes()
+        for wall in wall_array:
+            self.ax.plot(
+                [wall[0][0], wall[1][0]],
+                [wall[0][1], wall[1][1]],
+                'k-',
+                linewidth=2
+            )
+        if title:
+            self.ax.set_title(title)
+
+    def draw_world_time(self, t):
+        self.draw_walls(get_walls(t), title=f"t = {t:.1f} sec ({current_phase_name(t)})")
+
+    def draw_world_full(self):
+        self.draw_walls(walls, title="Planning view")
+
+    def show(self, text=''):
+        self.fig.canvas.draw_idle()
+        plt.pause(0.001)
+        if len(text) > 0:
+            input(text + ' (hit return to continue)')
+
+    def drawNode(self, node, **kwargs):
+        self.ax.plot(node.x, node.y, **kwargs)
+
+    def drawPoint(self, x, y, **kwargs):
+        self.ax.plot(x, y, **kwargs)
+
+    # def drawEdge(self, head, tail, **kwargs):
+    #     self.ax.plot([head.x, tail.x], [head.y, tail.y], **kwargs)
+    def drawEdge(self, head, tail, **kwargs):
+        line, = self.ax.plot([head.x, tail.x], [head.y, tail.y], **kwargs)
+        return line
+
+    def drawPath(self, path, **kwargs):
+        for i in range(len(path) - 1):
+            self.drawEdge(path[i], path[i+1], **kwargs)
+
+    def updateEdge(self, line, head, tail):
+        line.set_data([head.x, tail.x], [head.y, tail.y])
+
 
 
 ######################################################################
@@ -178,63 +234,85 @@ class Visualization:
 class Node:
     #################
     # Initialization:
-    def __init__(self, x, y, d=0):
+    def __init__(self, x, y, t, d=0):
         # Define/remember the state/coordinates (x,y).
         self.x = x
         self.y = y
         self.d=d
+        self.t=t
         self.cost=d
         # Define a parent (cleared for now).
         self.parent = None
         self.edge_handle = None
         self.children=set()
 
-       
-
+    # def intermediate(self, other, alpha):
+    #     return Node(self.x + alpha * (other.x - self.x),
+    #                 self.y + alpha * (other.y - self.y))
+    def intermediate_t(self, other, alpha):
+        return Node(
+            self.x + alpha * (other.x - self.x),
+            self.y + alpha * (other.y - self.y),
+            self.t + alpha * (other.t - self.t),
+        )
     ################
     # Planner functions:
     # Compute the relative distance to another node.
-    def distance(self, other):
+    def distance_t(self, other):
+        return sqrt((other.x - self.x)**2 + (other.y - self.y)**2+ (other.t-self.t)**2)
+    
+    def distance(self,other):
         return sqrt((other.x - self.x)**2 + (other.y - self.y)**2)
-
     # def inFreespace(self):
     #     if self.x <= xmin or self.x >= xmax or self.y <= ymin or self.y >= ymax:
     #         return False
     #     return True
+    def speed(self,other):
+        dd=self.distance(other)
+        tt=other.t-self.t
+        return dd/tt
 
     def inFreespace(self, clearance=CLEARANCE):
+        tt=self.t
+        curr_obstacles=get_obstacles(tt)
         if (self.x <= xmin or self.x >= xmax or self.y <= ymin or self.y >= ymax):
             return False
         p = Point(self.x, self.y)
-        if not obstacles.disjoint(p):
+        if not curr_obstacles.disjoint(p):
             return False
-        if obstacles.context.distance(p)<clearance:
+        if curr_obstacles.context.distance(p)<clearance:
             return False
         return True
         
     
 
-    def connectsTo(self, other, clearance=CLEARANCE):
-        line = LineString([(self.x, self.y), (other.x, other.y)])
-        # 1) Must be collision-free (no intersection with obstacle interiors)
-        if not obstacles.disjoint(line):
+    def connectsTo(self, other, clearance=CLEARANCE, dt=DT):
+        t_diff = other.t - self.t
+        if t_diff <= 0:
             return False
 
-        # 2) Must keep clearance from obstacle boundaries
-        # distance from the segment to the boundary of the MultiPolygon
-        if obstacles.context.distance(line) < clearance:
+        dist_xy = self.distance(other)
+        speed = dist_xy / t_diff
+        if not (speed < MAXSPEED):
             return False
+
+        if not self.inFreespace(clearance):
+            return False
+        if not other.inFreespace(clearance):
+            return False
+
+        n_steps = int(np.ceil(t_diff / dt))
+        for k in range(1, n_steps):
+            tt = self.t + k * dt
+            alpha = (tt - self.t) / t_diff
+            node = self.intermediate_t(other, alpha)
+            if not node.inFreespace(clearance):
+                return False
+
         return True
 
-    # def connectsTo(self, other):
-    #     line = LineString([(self.x, self.y), (other.x, other.y)])
-    #     # Return True if path intersects any of the wall segments in the maze
-    #     return not line.crosses(obstacles.context)
 
-    # def connectsTo(self, other):
-    #     line = LineString([(self.x, self.y), (other.x, other.y)])
-    #     # collision with inflated walls = too close (includes actual intersection)
-    #     return walls_inflated_prep.disjoint(line)
+    
     
     def update_subtree_cost(self):
         for c in self.children:
@@ -259,47 +337,36 @@ class Node:
 
     # Compute/create an intermediate node.  This can be useful if you
     # need to check the local planner by testing intermediate nodes.
-    def intermediate(self, other, alpha):
-        return Node(self.x + alpha * (other.x - self.x),
-                    self.y + alpha * (other.y - self.y))
-
+    
 
 ######################################################################
 #
 #   RRT Functions
 #
 
-# def addtotree(tree,oldnode,newnode, is_start=True, visual=None):
-#     newnode.parent = oldnode
-#     tree.append(newnode)
-#     if visual:
-#         if is_start:
-#             visual.drawEdge(oldnode, newnode, color='g', linewidth=1)
-#         else:
-#             visual.drawEdge(oldnode, newnode, color='r', linewidth=1)
-#         visual.show()
+
 
 def addtotree(tree,oldnode,newnode, is_start=True, visual=None):
     newnode.parent = oldnode
     oldnode.children.add(newnode)
+    ## Encourage as less movement as possible: use spatial distance instead of space_time
     newnode.d=oldnode.distance(newnode)
     newnode.cost=oldnode.cost+newnode.d
     tree.append(newnode)
-    i,j=cell(newnode.x,newnode.y)
+    i,j,k=cell_t(newnode.x,newnode.y, newnode.t)
     if is_start:
-        counts_start[i, j] += 1
+        counts_start[i, j,k] += 1
     else:
-        counts_goal[i, j] += 1
+        counts_goal[i, j,k] += 1
     if visual:
         # if is_start:
         #     visual.drawEdge(oldnode, newnode, color='g', linewidth=1)
         # else:
         #     visual.drawEdge(oldnode, newnode, color='r', linewidth=1)
         # visual.show()
-        if visual:
-            color = 'g' if is_start else 'r'
-            newnode.edge_handle = visual.drawEdge(oldnode, newnode, color=color, linewidth=1)
-            visual.show()
+        color = 'g' if is_start else 'r'
+        newnode.edge_handle = visual.drawEdge(oldnode, newnode, color=color, linewidth=1)
+        visual.show()
 
 def sample_fn(is_start_tree=True,alpha=ALPHA, beta=BETA,max_tries=10):
     own   = counts_start if is_start_tree else counts_goal
@@ -307,69 +374,101 @@ def sample_fn(is_start_tree=True,alpha=ALPHA, beta=BETA,max_tries=10):
     w = (1.0 / np.power(own + 1.0, alpha)) * np.power(other + 1.0, beta)
     p = (w / w.sum()).ravel()
     for _ in range(max_tries):
-        idx = np.random.choice(NX * NY, p=p)
-        i, j = divmod(idx, NY)
+        idx = np.random.choice(NX * NY*NT, p=p)
+        i, j, k = np.unravel_index(idx, (NX, NY, NT))
 
         x0 = xmin + i * GRID
         x1 = min(x0 + GRID, xmax)
         y0 = ymin + j * GRID
         y1 = min(y0 + GRID, ymax)
+        t0 = tmin + k * GRID
+        t1 = min(t0 + GRID, tmax)
 
         x = random.uniform(x0, x1)
         y = random.uniform(y0, y1)
-        n = Node(x, y)
+        t= random.uniform(t0, t1)
+        n = Node(x, y,t)
         if n.inFreespace():
             return n
     return None
 
-def extend_towards(tree, target, is_start=True, ratio=1, visual=None):
+def extend_towards(tree, target, is_start=True, visual=None):
     """
-    Extend the tree toward target by repeatedly stepping DSTEP.
+    Extend the tree toward target in (x,y,t).
+
+    If is_start=True:
+        grow forward in time toward later target nodes.
+
+    If is_start=False:
+        grow backward in time toward earlier target nodes,
+        but feasibility is still checked in forward time, i.e.
+        newnode.connectsTo(last).
 
     Returns:
-        last:    last node added (or the nearest existing node if no progress)
-        success: True iff we reached the target (within DSTEP and connected)
+        last:    last node added (or nearest valid existing node if no progress)
+        success: True iff we reached the target
         n_added: number of new nodes appended to the tree in this call
     """
-    # 1) nearest node in tree
-    distances = np.array([node.distance(target) for node in tree])
-    index     = int(np.argmin(distances))
-    last      = tree[index]
-    last0=Node(last.x,last.y)
-    d0 = last0.distance(target)
-    n_added = 0
-    while True:
-        d = last.distance(target)
 
-        # Already there (rare, but possible)
+    # Pick only nodes that can move toward the target in the correct time direction.
+    if is_start:
+        valid_indices = [i for i, node in enumerate(tree) if (node.t < target.t and node.speed(target)<=MAXSPEED)]
+    else:
+        valid_indices = [i for i, node in enumerate(tree) if (node.t > target.t and target.speed(node)<=MAXSPEED)]
+
+    if not valid_indices:
+        return tree[0], False, 0
+
+    # Nearest valid node in spacetime distance.
+    index = min(valid_indices, key=lambda i: tree[i].distance_t(target))
+    last = tree[index]
+    n_added = 0
+
+    while True:
+        d = last.distance_t(target)
+
+        # Already there
         if d == 0.0:
             return last, True, n_added
 
-        # 2) propose next node
+        # Propose next node by spacetime interpolation
         if d <= DSTEP:
-            # clone target so we don't steal a node object from another tree
-            newnode = Node(target.x, target.y)
+            newnode = Node(target.x, target.y, target.t)
             reached_target = True
         else:
-            newnode = last.intermediate(target, DSTEP / d)
+            alpha = DSTEP / d
+            newnode = last.intermediate_t(target, alpha)
             reached_target = False
 
-        # 3) collision checks for this step
-        if (not newnode.inFreespace()) or (not last.connectsTo(newnode)):
-            # cannot extend further
+        # Enforce monotone time in the correct tree-growth direction
+        if is_start:
+            if newnode.t <= last.t:
+                return last, False, n_added
+        else:
+            if newnode.t >= last.t:
+                return last, False, n_added
+
+        # Check new node itself
+        if not newnode.inFreespace():
             return last, False, n_added
 
-        # 4) safe: add it
+        # Check dynamic feasibility in forward time
+        if is_start:
+            ok = last.connectsTo(newnode)
+        else:
+            ok = newnode.connectsTo(last)
+
+        if not ok:
+            return last, False, n_added
+
+        # Safe: add it
         addtotree(tree, last, newnode, is_start, visual)
         last = newnode
         n_added += 1
 
-        # 5) did we reach the target?
+        # Reached target
         if reached_target:
             return last, True, n_added
-
-        if last0.distance(newnode)>ratio*d0:
-            return last, False, n_added
 
         
     
@@ -380,17 +479,27 @@ def trace(node):
         node=node.parent
     return path
 
-def local_rewire_last(newnode, tree, radius, visual=None):
-    # best-parent step for newnode
-    neighbors = [n for n in tree if n.distance(newnode) <= radius]
+
+def local_rewire_last(newnode, tree, radius, is_start=True, visual=None):
+    # Neighborhood in spacetime
+    neighbors = [n for n in tree if n.distance_t(newnode) <= radius]
+
+    # Best-parent step for newnode
     best_parent = newnode.parent
     best_cost = best_parent.cost + best_parent.distance(newnode)
 
     for n in neighbors:
         if n is newnode:
             continue
-        if not n.connectsTo(newnode):
+
+        if is_start:
+            ok = n.connectsTo(newnode)
+        else:
+            ok = newnode.connectsTo(n)
+
+        if not ok:
             continue
+
         cand = n.cost + n.distance(newnode)
         if cand < best_cost:
             best_parent = n
@@ -401,12 +510,19 @@ def local_rewire_last(newnode, tree, radius, visual=None):
         if visual and newnode.edge_handle is not None:
             visual.updateEdge(newnode.edge_handle, best_parent, newnode)
 
-    # (optional) rewire neighbors through newnode (comment out if you want even lighter)
+    # Optional: rewire neighbors through newnode
     for n in neighbors:
         if n is newnode or n is newnode.parent:
             continue
+
         cand = newnode.cost + newnode.distance(n)
-        if cand < n.cost and newnode.connectsTo(n):
+
+        if is_start:
+            ok = newnode.connectsTo(n)
+        else:
+            ok = n.connectsTo(newnode)
+
+        if cand < n.cost and ok:
             n.rewire(newnode, newnode.distance(n))
             if visual and n.edge_handle is not None:
                 visual.updateEdge(n.edge_handle, newnode, n)
@@ -523,18 +639,19 @@ def rrt_connect(startnode, goalnode, visual=None):
 
     # Loop - keep growing the tree.
     steps = 0
+    next_report = 1000
     while True:
+        total_nodes = len(tree_ini) + len(tree_goal)
+        while total_nodes >= next_report:
+            print(f'have {total_nodes} nodes')
+            next_report += 1000
+
         if (steps >= SMAX) or (len(tree_ini)+len(tree_goal) >= NMAX):
             print("Aborted after %d steps and the tree having %d nodes" %
                     (steps, len(tree_ini)+len(tree_goal) ))
             return None
         # Determine the target state.
         swap = len(tree_ini) > len(tree_goal)
-        if (random.uniform(0.0, 1.0) < GOALFRAC):
-            targetnode = goalnode if not swap else startnode
-        else:
-            targetnode = Node(random.uniform(xmin, xmax),
-                              random.uniform(ymin, ymax))
         if not swap:
             is_start_1=True
             is_start_2=False
@@ -543,8 +660,16 @@ def rrt_connect(startnode, goalnode, visual=None):
             is_start_1=False
             is_start_2=True
             tree1, tree2 = tree_goal, tree_ini
-        last1, success1, n1 = extend_towards(tree1, targetnode, is_start_1, ratio=R, visual=visual)
-        last2, success2, n2= extend_towards(tree2, last1, is_start_2,ratio=1, visual=visual)
+        if (random.uniform(0.0, 1.0) < GOALFRAC):
+            targetnode = goalnode if not swap else startnode
+        else:
+            s=sample_fn(is_start_tree=is_start_1)
+            if s is None:
+                continue
+            targetnode=s
+        
+        last1, success1, n1 = extend_towards(tree1, targetnode, is_start_1, visual=visual)
+        last2, success2, n2= extend_towards(tree2, last1, is_start_2,visual=visual)
         steps += n1+n2
         if success2:
             if not swap:
@@ -563,7 +688,7 @@ def rrt_connect(startnode, goalnode, visual=None):
 
     
 def rrt_connect_star(startnode, goalnode, visual=None,
-                     radius=RADIUS, ratio=R):
+                     radius=RADIUS):
     # init roots
     startnode.parent=None; startnode.cost=0.0; startnode.d=0.0; startnode.children=set()
     goalnode.parent=None;  goalnode.cost =0.0; goalnode.d =0.0; goalnode.children=set()
@@ -574,8 +699,18 @@ def rrt_connect_star(startnode, goalnode, visual=None,
     first_solution_step = None
 
     steps = 0
+    next_report = 1000
     while True:
-        if (steps >= SMAX) or (len(tree_ini) + len(tree_goal) >= NMAX):
+        total_nodes = len(tree_ini) + len(tree_goal)
+        while total_nodes >= next_report:
+            print(f'have {total_nodes} nodes')
+            next_report += 1000
+
+        if (steps >= SMAX) or (total_nodes>= NMAX):
+            break
+        # soft cap only applies after first solution exists
+        if best_path is not None and total_nodes >= NUMNODE:
+            print(f"Stopped after refinement budget: nodes={total_nodes}")
             break
 
         swap = len(tree_ini) > len(tree_goal)
@@ -597,16 +732,16 @@ def rrt_connect_star(startnode, goalnode, visual=None,
         
 
         # grow tree1 toward target
-        last1, success1, n1 = extend_towards(tree1, targetnode, is_start_1, ratio=ratio, visual=visual)
+        last1, success1, n1 = extend_towards(tree1, targetnode, is_start_1, visual=visual)
         steps += n1
         if n1 == 0:
             continue
 
         # (optional) light rewiring only around the newest node in tree1
-        local_rewire_last(last1, tree1, radius, visual=visual)
+        local_rewire_last(last1, tree1, radius, is_start=is_start_1, visual=visual)
 
         # try to connect tree2 to last1
-        last2, success2, n2 = extend_towards(tree2, last1, is_start_2, ratio=1.0, visual=visual)
+        last2, success2, n2 = extend_towards(tree2, last1, is_start_2, visual=visual)
         steps += n2
 
         if success2:
@@ -701,52 +836,147 @@ def postProcess(path):
     shortpath.append(path[-1])
     return shortpath
 
+def point_on_path_at_time(path, t):
+    # path is assumed to have increasing time
+    if t <= path[0].t:
+        return path[0].x, path[0].y
 
+    if t >= path[-1].t:
+        return path[-1].x, path[-1].y
+
+    for i in range(len(path) - 1):
+        a = path[i]
+        b = path[i + 1]
+        if a.t <= t <= b.t:
+            alpha = (t - a.t) / (b.t - a.t)
+            x = a.x + alpha * (b.x - a.x)
+            y = a.y + alpha * (b.y - a.y)
+            return x, y
+
+    return path[-1].x, path[-1].y
 ######################################################################
 #
 #  Main Code
 #
+# def main():
+#     # Report the parameters.
+#     print('Running with step size ', DSTEP, ' and up to ', NMAX, ' nodes.')
+
+#     # Create the figure.  Some computers seem to need an additional show()?
+#     visual = Visualization()
+#     visual.show()
+
+#     # Create the start/goal nodes.
+#     startnode = Node(xstart, ystart)
+#     goalnode  = Node(xgoal,  ygoal)
+
+#     # Show the start/goal nodes.
+#     visual.drawNode(startnode, color='orange', marker='o')
+#     visual.drawNode(goalnode,  color='purple', marker='o')
+#     visual.show("Showing basic world")
+
+
+#     # Run the RRT planner.
+#     print("Running RRT...")
+#     # path = rrt_connect(startnode, goalnode, visual)
+#     path=rrt_connect_star(startnode, goalnode, visual)
+
+#     # If unable to connect, just note before closing.
+#     if not path:
+#         visual.show("UNABLE TO FIND A PATH")
+#         return
+
+#     # Show the path.
+#     cost = pathCost(path)
+#     visual.drawPath(path, color='r', linewidth=2)
+#     visual.show("Showing the raw path (cost/length %.1f)" % cost)
+
+
+#     # Post process the path.
+#     finalpath = postProcess(path)
+
+#     # Show the post-processed path.
+#     cost = pathCost(finalpath)
+#     visual.drawPath(finalpath, color='b', linewidth=2)
+#     visual.show("Showing the post-processed path (cost/length %.1f)" % cost)
+def animate_path(visual, path):
+    t = 0.0
+    while t <= TMAX:
+        visual.draw_world_time(t)
+        visual.drawPath(path, color='b', linewidth=2)
+
+        x, y = point_on_path_at_time(path, t)
+        visual.drawPoint(x, y, color='red', marker='o', markersize=10)
+
+        visual.drawPoint(xstart, ystart, color='orange', marker='o', markersize=8)
+        visual.drawPoint(xgoal,  ygoal,  color='purple', marker='o', markersize=8)
+
+        visual.show()
+        time.sleep(FRAME_DT)
+        t += FRAME_DT
 def main():
-    # Report the parameters.
     print('Running with step size ', DSTEP, ' and up to ', NMAX, ' nodes.')
 
-    # Create the figure.  Some computers seem to need an additional show()?
     visual = Visualization()
-    visual.show()
 
-    # Create the start/goal nodes.
-    startnode = Node(xstart, ystart)
-    goalnode  = Node(xgoal,  ygoal)
+    # --------------------------------------------------
+    # Part 1: show how the maze changes over time
+    # --------------------------------------------------
+    t = 0.0
+    while t <= TMAX/2:
+        visual.draw_world_time(t)
+        visual.drawPoint(xstart, ystart, color='orange', marker='o', markersize=8)
+        visual.drawPoint(xgoal,  ygoal,  color='purple', marker='o', markersize=8)
+        visual.show()
+        time.sleep(FRAME_DT)
+        t += FRAME_DT
 
-    # Show the start/goal nodes.
-    visual.drawNode(startnode, color='orange', marker='o')
-    visual.drawNode(goalnode,  color='purple', marker='o')
-    visual.show("Showing basic world")
+    visual.show("Finished showing time-varying maze")
 
+    # --------------------------------------------------
+    # Part 2: planning view on the full maze
+    # --------------------------------------------------
+    startnode = Node(xstart, ystart, 0.0)
+    goalnode  = Node(xgoal,  ygoal,  TMAX)
 
-    # Run the RRT planner.
+    visual.draw_world_full()
+    visual.drawNode(startnode, color='orange', marker='o', markersize=8)
+    visual.drawNode(goalnode,  color='purple', marker='o', markersize=8)
+    visual.show("Showing planning view")
+
     print("Running RRT...")
+    path = rrt_connect_star(startnode, goalnode, visual)
     # path = rrt_connect(startnode, goalnode, visual)
-    path=rrt_connect(startnode, goalnode, visual)
+    
 
-    # If unable to connect, just note before closing.
     if not path:
         visual.show("UNABLE TO FIND A PATH")
         return
+    finalpath=postProcess(path)
+    
 
-    # Show the path.
-    cost = pathCost(path)
+    # --------------------------------------------------
+    # Part 3: show the final path projected to x-y
+    # --------------------------------------------------
+    visual.draw_world_full()
+    visual.drawNode(startnode, color='orange', marker='o', markersize=8)
+    visual.drawNode(goalnode,  color='purple', marker='o', markersize=8)
     visual.drawPath(path, color='r', linewidth=2)
-    visual.show("Showing the raw path (cost/length %.1f)" % cost)
+    visual.show("Showing projected final path")
 
+    # --------------------------------------------------
+    # Part 4: animate a dot moving along the path
+    # --------------------------------------------------
+    animate_path(visual, finalpath)
 
-    # Post process the path.
-    finalpath = postProcess(path)
+    while True:
+        ans = input("Replay animation? (y/n): ").strip().lower()
+        if ans == 'y':
+            animate_path(visual, finalpath)
+        elif ans == 'n':
+            break
 
-    # Show the post-processed path.
-    cost = pathCost(finalpath)
-    visual.drawPath(finalpath, color='b', linewidth=2)
-    visual.show("Showing the post-processed path (cost/length %.1f)" % cost)
+    visual.show("Finished path animation")
 
 
 if __name__== "__main__":
