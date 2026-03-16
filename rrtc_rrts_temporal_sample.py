@@ -34,7 +34,7 @@ from binary_maze import walls, walls1, walls2, obstacles, obstacles1, obstacles2
 DSTEP    = 0.4
 GOALFRAC = 0.10
 CLEARANCE = 0.4
-
+MOVE=0.9
 # Maximum number of steps (attempts) or nodes (successful steps).
 
 # R=0.95
@@ -42,17 +42,22 @@ RADIUS=1.0
 ALPHA=1.0
 BETA=0
 
-MAXSPEED=3
 
-TMAX = 15       # total visualization time
-SWITCH_TIME = 4  # switch from maze 1 to maze 2
+MAXSPEED=3
+MARGIN=0.01
+
+# Group1_time: 
+# TMAX = 20
+# Group2_time:
+TMAX=20
+SWITCH_TIME = 2  # switch from maze 1 to maze 2
 FRAME_DT = 0.05     # seconds between redraws
 DT=0.05
 NUMNODE = 5000
 
 # Hard caps
-NMAX = 50000
-SMAX= 150000
+NMAX = 5000
+SMAX= 15000
 TWEIGHT=10
 
 ######################################################################
@@ -92,12 +97,22 @@ def cell_t(x,y,t):
 # Maze is continuous_maze.walls (thin line segments). No Shapely obstacles.
 
 # Start at center, goal in upper-right area (inside the gym maze bounds).
+# First group:
 # (xstart, ystart, tstart) = (-9, 11, 0)
 # (xgoal, ygoal,tgoal)  = (3, 5,TMAX)
+# Second group:
+# (xstart, ystart,tstart) = (-9, 11,0)
+# (xgoal, ygoal,tgoal)  = (-1, 3, TMAX)
+# Third group:
+# (xstart, ystart,tstart) = (-9, 11,0)
+# (xgoal, ygoal,tgoal)  = (11, 3,TMAX)
 
-
+# Fourth group:
 (xstart, ystart,tstart) = (-9, 11,0)
 (xgoal, ygoal,tgoal)  = (6,-3,TMAX)
+
+# (xgoal, ygoal,tgoal)  = (6, -3,TMAX)
+
 # Version 2
 def get_walls(t):
     if t < 0 or t > TMAX:
@@ -291,7 +306,7 @@ class Node:
 
         dist_xy = self.distance(other)
         speed = dist_xy / t_diff
-        if not (speed < MAXSPEED):
+        if not (speed <= MAXSPEED+MARGIN):
             return False
 
         if not self.inFreespace(clearance):
@@ -348,7 +363,7 @@ def addtotree(tree,oldnode,newnode, is_start=True, visual=None):
     newnode.parent = oldnode
     oldnode.children.add(newnode)
     ## Encourage as less movement as possible: use spatial distance instead of space_time
-    newnode.d=oldnode.distance_t(newnode)
+    newnode.d=oldnode.distance(newnode)
     newnode.cost=oldnode.cost+newnode.d
     tree.append(newnode)
     i,j,k=cell_t(newnode.x,newnode.y, newnode.t)
@@ -366,7 +381,7 @@ def addtotree(tree,oldnode,newnode, is_start=True, visual=None):
         newnode.edge_handle = visual.drawEdge(oldnode, newnode, color=color, linewidth=1)
         visual.show()
 
-def sample_fn(is_start_tree=True,alpha=ALPHA, beta=BETA,max_tries=10):
+def sample_fn_t(is_start_tree=True,alpha=ALPHA, beta=BETA,max_tries=10):
     own   = counts_start if is_start_tree else counts_goal
     other = counts_goal  if is_start_tree else counts_start
     w = (1.0 / np.power(own + 1.0, alpha)) * np.power(other + 1.0, beta)
@@ -388,6 +403,31 @@ def sample_fn(is_start_tree=True,alpha=ALPHA, beta=BETA,max_tries=10):
         n = Node(x, y,t)
         if n.inFreespace():
             return n
+    return None
+
+def sample_fn(is_start_tree=True, alpha=ALPHA, beta=BETA, max_tries=10):
+    own3   = counts_start if is_start_tree else counts_goal
+    other3 = counts_goal  if is_start_tree else counts_start
+
+    own2   = own3.sum(axis=2)
+    other2 = other3.sum(axis=2)
+
+    w = (1.0 / np.power(own2 + 1.0, alpha)) * np.power(other2 + 1.0, beta)
+    p = (w / w.sum()).ravel()
+
+    for _ in range(max_tries):
+        idx = np.random.choice(NX * NY, p=p)
+        i, j = divmod(idx, NY)
+
+        x0 = xmin + i * GRID
+        x1 = min(x0 + GRID, xmax)
+        y0 = ymin + j * GRID
+        y1 = min(y0 + GRID, ymax)
+
+        x = random.uniform(x0, x1)
+        y = random.uniform(y0, y1)
+        return x, y
+
     return None
 
 def extend_towards(tree, target, is_start=True, visual=None):
@@ -416,10 +456,7 @@ def extend_towards(tree, target, is_start=True, visual=None):
 
     if not valid_indices:
         return tree[0], False, 0
-
-    # if is_star:
-    #     index = min(valid_indices, key=lambda i: tree[i].cost + tree[i].distance_t(target))
-    # else:
+    
     index = min(valid_indices, key=lambda i: tree[i].distance_t(target))
     last = tree[index]
     n_added = 0
@@ -471,7 +508,83 @@ def extend_towards(tree, target, is_start=True, visual=None):
             return last, True, n_added
 
         
-    
+def extend_towards_node(tree, last, target, is_start=True,visual=None):
+    ## This function is the part of extend_towards without choosing the grownode. 
+    ## the grownode is chosen already and put int as last
+    n_added=0
+    while True:
+        d=last.distance_t(target)
+        if d == 0.0:
+            return last, True, n_added
+
+        if d <= DSTEP:
+            newnode = Node(target.x, target.y, target.t)
+            reached_target = True
+        else:
+            alpha = DSTEP / d
+            newnode = last.intermediate_t(target, alpha)
+            reached_target = False
+        if is_start:
+            if newnode.t <= last.t:
+                return last, False, n_added
+        else:
+            if newnode.t >= last.t:
+                return last, False, n_added
+
+        if not newnode.inFreespace():
+            return last, False, n_added
+
+        if is_start:
+            ok = last.connectsTo(newnode)
+        else:
+            ok = newnode.connectsTo(last)
+
+        if not ok:
+            return last, False, n_added
+        
+        addtotree(tree, last, newnode, is_start, visual)
+        last = newnode
+        n_added += 1
+
+        if reached_target:
+            return last, True, n_added
+
+def growth_node(tree,x,y,is_start=True,movefrac=MOVE):
+    move_branch = (random.uniform(0.0, 1.0) < movefrac)
+    candidates = []
+    for i, node in enumerate(tree):
+        dist = sqrt((x - node.x)**2 + (y - node.y)**2)
+
+        if move_branch:
+            if is_start:
+                t_target = node.t + dist / MAXSPEED
+            else:
+                t_target = node.t - dist / MAXSPEED
+        else:
+            if is_start:
+                t_target = node.t + DSTEP
+            else:
+                t_target = node.t - DSTEP
+
+        if not (tmin <= t_target <= tmax):
+            continue
+
+        key = dist
+        candidates.append((key, i, t_target))
+    if not candidates:
+        return None, None
+
+    _, index, t_target = min(candidates, key=lambda z: z[0])
+    grownode = tree[index]
+
+    if move_branch:
+        targetnode = Node(x, y, t_target)
+    else:
+        targetnode = Node(grownode.x, grownode.y, t_target)
+
+    return grownode, targetnode
+
+
 def trace(node):
     path=[]
     while node is not None:
@@ -660,15 +773,21 @@ def rrt_connect(startnode, goalnode, visual=None):
             is_start_1=False
             is_start_2=True
             tree1, tree2 = tree_goal, tree_ini
-        if (random.uniform(0.0, 1.0) < GOALFRAC):
-            targetnode = goalnode if not swap else startnode
-        else:
-            s=sample_fn(is_start_tree=is_start_1)
-            if s is None:
-                continue
-            targetnode=s
         
-        last1, success1, n1 = extend_towards(tree1, targetnode, is_start_1, visual=visual)
+        if random.uniform(0.0, 1.0) < GOALFRAC:
+            # exact temporal target
+            targetnode = goalnode if not swap else startnode
+            last1, success1, n1 = extend_towards(tree1, targetnode, is_start_1, visual=visual)
+        else:
+            xy=sample_fn(is_start_tree=is_start_1)
+            if xy is None:
+                continue
+            x,y=xy
+
+            grownode,targetnode=growth_node(tree1,x,y,is_start=is_start_1)
+            if targetnode is None:
+                continue
+            last1, success1, n1 = extend_towards_node(tree1, grownode,targetnode, is_start_1, visual=visual)
         #if targetnode is goalnode then can already stop
         last2, success2, n2= extend_towards(tree2, last1, is_start_2,visual=visual)
         steps += n1+n2
@@ -725,16 +844,18 @@ def rrt_connect_star(startnode, goalnode, visual=None,
 
         if random.uniform(0.0, 1.0) < GOALFRAC:
             targetnode = goalnode if not swap else startnode
+            last1, success1, n1 = extend_towards(tree1, targetnode, is_start_1, visual=visual)
         else:
-            s=sample_fn(is_start_tree=is_start_1)
-            if s is None:
+            xy=sample_fn(is_start_tree=is_start_1)
+            if xy is None:
                 continue
-            targetnode=s
+            x,y=xy
+            grownode,targetnode=growth_node(tree1,x,y,is_start=is_start_1)
+            if targetnode is None:
+                continue
+            last1, success1, n1 = extend_towards_node(tree1, grownode,targetnode, is_start_1, visual=visual)
 
         
-
-        # grow tree1 toward target
-        last1, success1, n1 = extend_towards(tree1, targetnode, is_start_1, visual=visual)
         steps += n1
         if n1 == 0:
             continue
@@ -947,14 +1068,16 @@ def main():
     visual.show("Showing planning view")
 
     print("Running RRT...")
-    #path = rrt_connect_star(startnode, goalnode, visual)
-    path = rrt_connect(startnode, goalnode, visual)
+    path = rrt_connect_star(startnode, goalnode, visual)
+    # path = rrt_connect(startnode, goalnode, visual)
     
 
     if not path:
         visual.show("UNABLE TO FIND A PATH")
         return
     finalpath=postProcess(path)
+    finalcost = pathCost(finalpath)
+    print(f"Final path cost: {finalcost:.3f}")
     
 
     # --------------------------------------------------

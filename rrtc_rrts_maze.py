@@ -77,7 +77,7 @@ def cell(x, y):
 (xstart, ystart) = (-9, 11)
 # (xstart, ystart) = (0, 0)
 # (xgoal,  ygoal)  = (9, 8)
-(xgoal,  ygoal)  = (-1, 3)
+(xgoal,  ygoal)  = (6, -3)
 # (xgoal,  ygoal)  = (5, -3)
 
 
